@@ -1,0 +1,180 @@
+#!/bin/bash
+
+# public domain
+
+# 自分用なので色々手抜き
+# 無保証
+
+# 一部
+# http://www.atmarkit.co.jp/ait/articles/1208/17/news110.html
+# を参考にしているので、コピペしたり、あえて非効率な実装になってます。
+# しかし、ファイル分けるのが面倒なので、関数とか使ってます。
+
+#set -x
+[ $# != 3 -a $# != 4 ] &&
+{
+echo "usage "
+echo "genpass DOMAIN USERNAME KIGOU [ACCOUNTS_TXT]"
+
+echo "記号の中に空白が含まれていた場合無視されます"
+echo "記号はシングルクオーテーションで囲いましょう(ダブるクォーテーションが使えるようになり、シェルの特殊記号が無効になります)"
+#echo "バッククォートは除去しましょう(シェルの仕様でエスケープできないため)"
+echo "生成されるパスワードには4文字記号が入ります"
+echo "ACCOUNTS_TXTが指定されていた場合、ACCOUNTS_TXTに DOMAIN USERNAME KIGOU等の情報が記録されます(パスワードそのものやパスフレーズは記録されません)。"
+echo "ACCOUNTS_TXTが指定されていた場合でも、重複して記録されることはありません。"
+echo
+echo "このソフトは無保証です。"
+exit 1
+}
+
+function escape_kigou {
+    echo -n "$1" | while read -r -n 1 char;do
+        echo -n '\'"$char"
+    done
+}
+
+KIGOU=$(echo -n "$3"|tr -d ' ') #空白除去
+
+echo -n PHRASE :
+read PHRASE
+
+echo
+echo "DOMAIN  :" $1
+echo "USERNAME:" $2
+echo "KIGOU   :" "$KIGOU"
+echo "HASHED PHRASE:" `echo -n "$PHRASE"|md5sum|cut -d" " -f 1`
+echo "commands:"
+echo genpass $1 $2 \'"$KIGOU"\'
+echo
+
+
+function random_seq_0_15 {
+    local SEED="$1"
+    echo -n "$SEED" | md5sum | head -c 16 |
+        while read -n 1 char;do
+            echo "$char"
+        done |
+
+        # 16進法でソートする方法がないので、
+        # 開き直って文字としてソートする
+        paste - <(seq 0 15) | sort | cut -f 2
+}
+
+
+
+function kigou_x62 {
+    # 62 は0-9 a-z A-Z の個数
+    # 与えられた文字を62倍する
+    for i in {1..62};do
+        echo -n "$1"
+    done
+    echo
+}
+
+
+# まず、16文字のうち、記号化するものを4つ選ぶ
+# 次に、選んだ文字を記号に変換する
+#    変換テーブルは、tr -t '[:lower:]'  "$KIGOU"*(10 + 26*2)
+
+
+function num_tr {
+    # 指定したindexの文字だけtrがかかる
+    # オプションはない
+    # index は0から始まる
+    # num_tr set1 set2 index1 index2 ...
+
+    local SET1="$1"
+    local SET2="$2"
+
+    shift 2
+
+    local index_set=()
+
+    while [ -n "$1" ];do
+        index_set["$1"]=1
+        shift
+    done
+
+    local count=0
+    while read -n 1 char;do
+
+        if [ -n "${index_set[$count]}" ];then
+            echo -n "$char" | tr -t "$SET1" "$SET2"
+        else
+            echo -n "$char"
+        fi
+        : $((count++))
+    done
+    
+}
+
+
+function gen_passwd {
+    #usage: gen_passwd domain username 空白を含まない記号 フレーズ
+
+    local KIGOU="$3"
+    local PHRASE="$4"
+    
+    # cut -d" " -f 1 はなくてもいい
+    local BASE_PASSWD=$(echo -n  "$1""$2""$PHRASE"|md5sum|cut -d" " -f 1|base64|head --bytes 16)
+
+    local INDEX_ARR=($( random_seq_0_15 "$BASE_PASSWD""$KIGOU" | head -n 4))
+
+    local PASSWD=$(echo -n "$BASE_PASSWD" | num_tr '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ' "$(kigou_x62 $(escape_kigou "$KIGOU"))" ${INDEX_ARR[@]})
+
+    echo "$PASSWD"
+
+}
+
+gen_passwd "$1" "$2" "$KIGOU" "$PHRASE"
+
+#おまけ
+ACCOUNTS_TXT="$4"
+[ -n "$ACCOUNTS_TXT" ] && {
+    TEST_PASSWD=$(gen_passwd "genpass.org" "user" ',./\<>?_;:]+*}@[`{!"#$%&()=|-^' "phrase")
+
+    [ ! -e "$ACCOUNTS_TXT" ] && (
+        echo -n >"$ACCOUNTS_TXT" &&
+        echo GENERAL_HASHED_PHRASE" "$(echo -n "$PHRASE"|md5sum|cut -d" " -f 1) >> "$ACCOUNTS_TXT" &&
+        echo TEST_PASSWD" ""$TEST_PASSWD" >> "$ACCOUNTS_TXT" &&
+        echo >> "$ACCOUNTS_TXT" &&
+
+        echo "$ACCOUNTS_TXT" "を作成しました" || exit 1
+    )
+    
+
+
+    #grep -x 完全一致
+    #grep -F non正規表現
+    { read ACCOUNTS_TXT_LINE1; read ACCOUNTS_TXT_LINE2; } <"$ACCOUNTS_TXT"
+    echo "$ACCOUNTS_TXT_LINE1" | grep GENERAL_HASHED_PHRASE" " >/dev/null ||
+	{ echo "genpass(エラー): GENERAL_HASHED_PHRASE が正しく記述されていません">&2; exit 1; }
+    [ x`echo "$ACCOUNTS_TXT_LINE1" | cut -d" " -f 2` = x`echo -n "$PHRASE"|md5sum|cut -d" " -f 1` ] ||
+	{ echo "genpass(エラー): パスフレーズのハッシュ値が一致しません" >&2; exit 1; }
+
+    echo "$ACCOUNTS_TXT_LINE2" | grep TEST_PASSWD" " >/dev/null ||
+	{ echo "genpass(エラー): TEST_PASSWDが正しく記述されていません">&2; exit 1; }
+    [ x`echo "$ACCOUNTS_TXT_LINE2" | cut -d" " -f 2` = x"$TEST_PASSWD" ] ||
+	{ echo "genpass(エラー): TEST_PASSWDが一致しません。生成するパスワードに互換性がありません!" >&2; exit 1; }
+
+    grep "genpass $1 $2" $ACCOUNTS_TXT >/dev/null && ! grep -F -x "genpass $1 $2 '$KIGOU'" $ACCOUNTS_TXT >/dev/null &&
+	{ echo "genpass(エラー): 同じドメイン、IDで異なる記号のパスワードがあります" >&2; exit 1; }
+
+    # パスワードが登録されていないときは登録する
+    if ! grep -F -x "genpass $1 $2 '$KIGOU'" $ACCOUNTS_TXT >/dev/null 
+    then
+	(
+	    echo "DOMAIN  :" $1
+	    echo "USERNAME:" $2
+	    echo "KIGOU   :" "$KIGOU"
+	    echo "HASHED PHRASE:" `echo -n "$PHRASE"|md5sum|cut -d" " -f 1`
+	    echo "commands:"
+	    echo genpass $1 $2 \'"$KIGOU"\'
+	    echo
+
+	) >>$ACCOUNTS_TXT && echo "パスワードを"$ACCOUNTS_TXT"に登録しました."
+    else
+	echo  "パスワードは"$ACCOUNTS_TXT"に登録済です."
+    fi
+}
+exit 0
